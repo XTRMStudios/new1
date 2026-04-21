@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 APP_DIR="${APP_DIR:-$PWD/pterodactyl-panel}"
 PANEL_PORT="${PANEL_PORT:-8080}"
@@ -15,6 +16,9 @@ ADMIN_USERNAME="${PTERO_ADMIN_USERNAME:-admin}"
 ADMIN_FIRST="${PTERO_ADMIN_FIRST_NAME:-Admin}"
 ADMIN_LAST="${PTERO_ADMIN_LAST_NAME:-User}"
 ADMIN_PASSWORD="${PTERO_ADMIN_PASSWORD:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}"
+
+PHP_BIN="/usr/bin/php8.3"
+COMPOSER_BIN="/usr/bin/composer"
 
 if [[ "${EUID}" -eq 0 ]]; then
   SUDO=""
@@ -58,8 +62,21 @@ $SUDO apt-get update
 $SUDO apt-get install -y \
   curl ca-certificates unzip tar git jq openssl \
   mariadb-server redis-server nginx \
-  php php-cli php-fpm php-mysql php-gd php-mbstring php-bcmath php-xml php-curl php-zip \
-  composer
+  php8.3 php8.3-cli php8.3-fpm php8.3-mysql php8.3-gd php8.3-mbstring php8.3-bcmath php8.3-xml php8.3-curl php8.3-zip php8.3-intl php8.3-sqlite3 php8.3-common php8.3-readline libapache2-mod-php8.3 \
+  php-cli php-fpm php-mysql php-gd php-mbstring php-bcmath php-xml php-curl php-zip php-intl \
+  composer redis-tools mariadb-client
+
+log "Checking PHP binary"
+if [[ ! -x "$PHP_BIN" ]]; then
+  echo "Expected PHP binary not found at $PHP_BIN"
+  exit 1
+fi
+
+log "Checking required PHP extensions"
+"$PHP_BIN" -m | grep -qi '^pdo_mysql$' || { echo "pdo_mysql missing"; exit 1; }
+"$PHP_BIN" -m | grep -qi '^zip$' || { echo "zip missing"; exit 1; }
+"$PHP_BIN" -m | grep -qi '^bcmath$' || { echo "bcmath missing"; exit 1; }
+"$PHP_BIN" -m | grep -qi '^sodium$' || { echo "sodium missing"; exit 1; }
 
 log "Starting MariaDB and Redis"
 start_service mariadb
@@ -77,15 +94,16 @@ curl -fsSL https://github.com/pterodactyl/panel/releases/latest/download/panel.t
 tar -xzf panel.tar.gz
 rm -f panel.tar.gz
 
-log "Installing PHP dependencies"
+log "Preparing environment file"
 if [[ ! -f ".env" ]]; then
   cp .env.example .env
 fi
 
-COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
+log "Installing PHP dependencies with forced PHP 8.3"
+COMPOSER_ALLOW_SUPERUSER=1 "$PHP_BIN" "$COMPOSER_BIN" install --no-dev --optimize-autoloader
 
 log "Generating app key"
-php artisan key:generate --force
+"$PHP_BIN" artisan key:generate --force
 
 log "Creating database and database user"
 mysql -u root <<SQL
@@ -98,60 +116,76 @@ FLUSH PRIVILEGES;
 SQL
 
 log "Writing environment config"
-php -r '
-$path = ".env";
-$env = file_get_contents($path);
+cat > .env <<EOF
+APP_NAME=Pterodactyl
+APP_ENV=production
+APP_KEY=
+APP_DEBUG=true
+APP_URL=${APP_URL}
 
-$vars = [
-  "APP_ENV" => "production",
-  "APP_DEBUG" => "true",
-  "APP_URL" => getenv("APP_URL_SET"),
-  "DB_CONNECTION" => "mysql",
-  "DB_HOST" => "127.0.0.1",
-  "DB_PORT" => "3306",
-  "DB_DATABASE" => getenv("DB_NAME_SET"),
-  "DB_USERNAME" => getenv("DB_USER_SET"),
-  "DB_PASSWORD" => getenv("DB_PASS_SET"),
-  "CACHE_DRIVER" => "file",
-  "SESSION_DRIVER" => "file",
-  "QUEUE_CONNECTION" => "redis",
-  "REDIS_HOST" => "127.0.0.1",
-  "REDIS_PASSWORD" => "null",
-  "REDIS_PORT" => "6379",
-];
+APP_TIMEZONE=UTC
+APP_SERVICE_AUTHOR=unknown@example.com
 
-foreach ($vars as $key => $value) {
-  if (preg_match("/^{$key}=.*/m", $env)) {
-    $env = preg_replace("/^{$key}=.*/m", "{$key}={$value}", $env);
-  } else {
-    $env .= PHP_EOL . "{$key}={$value}";
-  }
-}
+TRUSTED_PROXIES=*
+LOG_CHANNEL=stack
+LOG_DEPRECATIONS_CHANNEL=null
+LOG_LEVEL=debug
 
-file_put_contents($path, $env);
-' \
-APP_URL_SET="$APP_URL" \
-DB_NAME_SET="$DB_NAME" \
-DB_USER_SET="$DB_USER" \
-DB_PASS_SET="$DB_PASS"
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=${DB_NAME}
+DB_USERNAME=${DB_USER}
+DB_PASSWORD=${DB_PASS}
+
+BROADCAST_DRIVER=log
+CACHE_STORE=file
+FILESYSTEM_DISK=local
+QUEUE_CONNECTION=redis
+SESSION_DRIVER=file
+SESSION_LIFETIME=120
+
+MEMCACHED_HOST=127.0.0.1
+
+REDIS_CLIENT=phpredis
+REDIS_HOST=127.0.0.1
+REDIS_PASSWORD=null
+REDIS_PORT=6379
+
+MAIL_MAILER=log
+MAIL_SCHEME=null
+MAIL_HOST=127.0.0.1
+MAIL_PORT=1025
+MAIL_USERNAME=null
+MAIL_PASSWORD=null
+MAIL_FROM_ADDRESS="panel@example.com"
+MAIL_FROM_NAME="Pterodactyl"
+
+APP_ENVIRONMENT_ONLY=false
+EOF
+
+log "Regenerating app key into new .env"
+"$PHP_BIN" artisan key:generate --force
 
 log "Fixing permissions"
 mkdir -p storage/logs bootstrap/cache
 chmod -R 755 storage bootstrap/cache || true
 
 log "Running migrations and seeds"
-php artisan migrate --seed --force
+"$PHP_BIN" artisan migrate --seed --force
 
-log "Caching config"
-php artisan storage:link || true
-php artisan config:clear || true
-php artisan config:cache || true
-php artisan route:cache || true
-php artisan view:cache || true
+log "Storage and caches"
+"$PHP_BIN" artisan storage:link || true
+"$PHP_BIN" artisan config:clear || true
+"$PHP_BIN" artisan cache:clear || true
+"$PHP_BIN" artisan view:clear || true
+"$PHP_BIN" artisan config:cache || true
+"$PHP_BIN" artisan route:cache || true
+"$PHP_BIN" artisan view:cache || true
 
 if [[ -n "$ADMIN_EMAIL" ]]; then
   log "Creating admin user"
-  php artisan p:user:make \
+  "$PHP_BIN" artisan p:user:make \
     --email="$ADMIN_EMAIL" \
     --username="$ADMIN_USERNAME" \
     --name-first="$ADMIN_FIRST" \
@@ -162,14 +196,16 @@ else
   log "Skipping admin creation because PTERO_ADMIN_EMAIL is not set"
 fi
 
-log "Starting queue worker"
+log "Stopping old workers if present"
 pkill -f "artisan queue:work" >/dev/null 2>&1 || true
-nohup php artisan queue:work --queue=high,standard,low --sleep=3 --tries=3 \
+pkill -f "artisan serve --host=0.0.0.0 --port=${PANEL_PORT}" >/dev/null 2>&1 || true
+
+log "Starting queue worker"
+nohup "$PHP_BIN" artisan queue:work --queue=high,standard,low --sleep=3 --tries=3 \
   > storage/logs/queue-worker.log 2>&1 &
 
-log "Starting Panel on port ${PANEL_PORT}"
-pkill -f "artisan serve --host=0.0.0.0 --port=${PANEL_PORT}" >/dev/null 2>&1 || true
-nohup php artisan serve --host=0.0.0.0 --port="${PANEL_PORT}" \
+log "Starting panel on port ${PANEL_PORT}"
+nohup "$PHP_BIN" artisan serve --host=0.0.0.0 --port="${PANEL_PORT}" \
   > storage/logs/panel-web.log 2>&1 &
 
 echo
@@ -181,6 +217,7 @@ echo "App dir: $APP_DIR"
 echo "DB name: $DB_NAME"
 echo "DB user: $DB_USER"
 echo "DB pass: $DB_PASS"
+echo "PHP binary: $PHP_BIN"
 if [[ -n "$ADMIN_EMAIL" ]]; then
   echo "Admin email: $ADMIN_EMAIL"
   echo "Admin username: $ADMIN_USERNAME"
@@ -188,7 +225,7 @@ if [[ -n "$ADMIN_EMAIL" ]]; then
 else
   echo "Admin account not auto-created."
   echo "Create one with:"
-  echo "  cd $APP_DIR && php artisan p:user:make"
+  echo "  cd $APP_DIR && $PHP_BIN artisan p:user:make"
 fi
 echo
 echo "Logs:"
