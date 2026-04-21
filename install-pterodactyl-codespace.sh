@@ -1,40 +1,20 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# ==========================================
-# Pterodactyl Panel installer for GitHub Codespaces
-# - Installs deps
-# - Downloads latest official panel release
-# - Sets up MariaDB + Redis
-# - Configures .env
-# - Runs migrations
-# - Starts panel on port 8080
-#
-# Optional env vars before running:
-#   PTERO_DB_NAME
-#   PTERO_DB_USER
-#   PTERO_DB_PASS
-#   PTERO_ADMIN_EMAIL
-#   PTERO_ADMIN_USERNAME
-#   PTERO_ADMIN_FIRST_NAME
-#   PTERO_ADMIN_LAST_NAME
-#   PTERO_ADMIN_PASSWORD
-# ==========================================
-
 export DEBIAN_FRONTEND=noninteractive
 
 APP_DIR="${APP_DIR:-$PWD/pterodactyl-panel}"
 PANEL_PORT="${PANEL_PORT:-8080}"
 
-PTERO_DB_NAME="${PTERO_DB_NAME:-panel}"
-PTERO_DB_USER="${PTERO_DB_USER:-pterodactyl}"
-PTERO_DB_PASS="${PTERO_DB_PASS:-$(openssl rand -base64 18 | tr -d '=+/' | cut -c1-20)}"
+DB_NAME="${PTERO_DB_NAME:-panel}"
+DB_USER="${PTERO_DB_USER:-pterodactyl}"
+DB_PASS="${PTERO_DB_PASS:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}"
 
-PTERO_ADMIN_EMAIL="${PTERO_ADMIN_EMAIL:-}"
-PTERO_ADMIN_USERNAME="${PTERO_ADMIN_USERNAME:-admin}"
-PTERO_ADMIN_FIRST_NAME="${PTERO_ADMIN_FIRST_NAME:-Admin}"
-PTERO_ADMIN_LAST_NAME="${PTERO_ADMIN_LAST_NAME:-User}"
-PTERO_ADMIN_PASSWORD="${PTERO_ADMIN_PASSWORD:-$(openssl rand -base64 18 | tr -d '=+/' | cut -c1-20)}"
+ADMIN_EMAIL="${PTERO_ADMIN_EMAIL:-}"
+ADMIN_USERNAME="${PTERO_ADMIN_USERNAME:-admin}"
+ADMIN_FIRST="${PTERO_ADMIN_FIRST_NAME:-Admin}"
+ADMIN_LAST="${PTERO_ADMIN_LAST_NAME:-User}"
+ADMIN_PASSWORD="${PTERO_ADMIN_PASSWORD:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}"
 
 if [[ "${EUID}" -eq 0 ]]; then
   SUDO=""
@@ -47,24 +27,9 @@ log() {
   echo "==> $*"
 }
 
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "Missing required command: $1" >&2
-    exit 1
-  }
-}
-
-detect_app_url() {
-  if [[ -n "${CODESPACE_NAME:-}" && -n "${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]]; then
-    echo "https://${CODESPACE_NAME}-${PANEL_PORT}.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}"
-  else
-    echo "http://127.0.0.1:${PANEL_PORT}"
-  fi
-}
-
-start_service_safe() {
-  local svc="$1"
-  $SUDO service "$svc" start >/dev/null 2>&1 || true
+start_service() {
+  local name="$1"
+  $SUDO service "$name" start >/dev/null 2>&1 || true
 }
 
 wait_for_mysql() {
@@ -74,176 +39,160 @@ wait_for_mysql() {
     fi
     sleep 2
   done
-  echo "MariaDB did not become ready in time." >&2
+  echo "MariaDB did not start in time."
   exit 1
 }
 
-APP_URL="$(detect_app_url)"
+detect_url() {
+  if [[ -n "${CODESPACE_NAME:-}" && -n "${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]]; then
+    echo "https://${CODESPACE_NAME}-${PANEL_PORT}.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}"
+  else
+    echo "http://127.0.0.1:${PANEL_PORT}"
+  fi
+}
 
-log "Updating apt and installing packages"
+APP_URL="$(detect_url)"
+
+log "Installing system packages"
 $SUDO apt-get update
 $SUDO apt-get install -y \
-  curl ca-certificates unzip tar git redis-server mariadb-server nginx \
+  curl ca-certificates unzip tar git jq openssl \
+  mariadb-server redis-server nginx \
   php php-cli php-fpm php-mysql php-gd php-mbstring php-bcmath php-xml php-curl php-zip \
-  composer jq openssl
+  composer
 
-require_cmd curl
-require_cmd tar
-require_cmd php
-require_cmd composer
-require_cmd mysql
-
-log "Starting MariaDB and Redis with service (Codespaces-friendly)"
-start_service_safe mariadb
-start_service_safe mysql
-start_service_safe redis-server
+log "Starting MariaDB and Redis"
+start_service mariadb
+start_service mysql
+start_service redis-server
 
 wait_for_mysql
 
-log "Creating app directory"
+log "Preparing app directory"
 mkdir -p "$APP_DIR"
 cd "$APP_DIR"
 
-log "Downloading latest official Pterodactyl Panel release"
-curl -L https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz -o panel.tar.gz
+log "Downloading latest Pterodactyl Panel"
+curl -fsSL https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz -o panel.tar.gz
 tar -xzf panel.tar.gz
 rm -f panel.tar.gz
 
-log "Setting permissions"
-mkdir -p storage/logs bootstrap/cache
-chmod -R 755 storage bootstrap/cache || true
-
+log "Installing PHP dependencies"
 if [[ ! -f ".env" ]]; then
   cp .env.example .env
 fi
 
-log "Installing PHP dependencies"
 COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
 
-log "Generating application key"
+log "Generating app key"
 php artisan key:generate --force
 
-log "Creating MariaDB database and user"
+log "Creating database and database user"
 mysql -u root <<SQL
-CREATE DATABASE IF NOT EXISTS \`${PTERO_DB_NAME}\`;
-CREATE USER IF NOT EXISTS '${PTERO_DB_USER}'@'127.0.0.1' IDENTIFIED BY '${PTERO_DB_PASS}';
-CREATE USER IF NOT EXISTS '${PTERO_DB_USER}'@'localhost' IDENTIFIED BY '${PTERO_DB_PASS}';
-GRANT ALL PRIVILEGES ON \`${PTERO_DB_NAME}\`.* TO '${PTERO_DB_USER}'@'127.0.0.1';
-GRANT ALL PRIVILEGES ON \`${PTERO_DB_NAME}\`.* TO '${PTERO_DB_USER}'@'localhost';
+CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;
+CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
+CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
+GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 SQL
 
-log "Writing .env settings"
-sed -i "s|^APP_ENV=.*|APP_ENV=production|" .env
-sed -i "s|^APP_DEBUG=.*|APP_DEBUG=true|" .env
-sed -i "s|^APP_URL=.*|APP_URL=${APP_URL}|" .env
+log "Writing environment config"
+php -r '
+$path = ".env";
+$env = file_get_contents($path);
 
-sed -i "s|^DB_CONNECTION=.*|DB_CONNECTION=mysql|" .env
-sed -i "s|^DB_HOST=.*|DB_HOST=127.0.0.1|" .env
-sed -i "s|^DB_PORT=.*|DB_PORT=3306|" .env
-sed -i "s|^DB_DATABASE=.*|DB_DATABASE=${PTERO_DB_NAME}|" .env
-sed -i "s|^DB_USERNAME=.*|DB_USERNAME=${PTERO_DB_USER}|" .env
-sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=${PTERO_DB_PASS}|" .env
+$vars = [
+  "APP_ENV" => "production",
+  "APP_DEBUG" => "true",
+  "APP_URL" => getenv("APP_URL_SET"),
+  "DB_CONNECTION" => "mysql",
+  "DB_HOST" => "127.0.0.1",
+  "DB_PORT" => "3306",
+  "DB_DATABASE" => getenv("DB_NAME_SET"),
+  "DB_USERNAME" => getenv("DB_USER_SET"),
+  "DB_PASSWORD" => getenv("DB_PASS_SET"),
+  "CACHE_DRIVER" => "file",
+  "SESSION_DRIVER" => "file",
+  "QUEUE_CONNECTION" => "redis",
+  "REDIS_HOST" => "127.0.0.1",
+  "REDIS_PASSWORD" => "null",
+  "REDIS_PORT" => "6379",
+];
 
-sed -i "s|^CACHE_DRIVER=.*|CACHE_DRIVER=file|" .env
-sed -i "s|^SESSION_DRIVER=.*|SESSION_DRIVER=file|" .env
-sed -i "s|^QUEUE_CONNECTION=.*|QUEUE_CONNECTION=redis|" .env
+foreach ($vars as $key => $value) {
+  if (preg_match("/^{$key}=.*/m", $env)) {
+    $env = preg_replace("/^{$key}=.*/m", "{$key}={$value}", $env);
+  } else {
+    $env .= PHP_EOL . "{$key}={$value}";
+  }
+}
 
-if grep -q '^REDIS_HOST=' .env; then
-  sed -i "s|^REDIS_HOST=.*|REDIS_HOST=127.0.0.1|" .env
-else
-  echo "REDIS_HOST=127.0.0.1" >> .env
-fi
+file_put_contents($path, $env);
+' \
+APP_URL_SET="$APP_URL" \
+DB_NAME_SET="$DB_NAME" \
+DB_USER_SET="$DB_USER" \
+DB_PASS_SET="$DB_PASS"
 
-if grep -q '^REDIS_PASSWORD=' .env; then
-  sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=null|" .env
-else
-  echo "REDIS_PASSWORD=null" >> .env
-fi
+log "Fixing permissions"
+mkdir -p storage/logs bootstrap/cache
+chmod -R 755 storage bootstrap/cache || true
 
-if grep -q '^REDIS_PORT=' .env; then
-  sed -i "s|^REDIS_PORT=.*|REDIS_PORT=6379|" .env
-else
-  echo "REDIS_PORT=6379" >> .env
-fi
-
-log "Running database migrations and seeders"
+log "Running migrations and seeds"
 php artisan migrate --seed --force
 
-log "Linking storage and caching config"
+log "Caching config"
 php artisan storage:link || true
 php artisan config:clear || true
 php artisan config:cache || true
 php artisan route:cache || true
 php artisan view:cache || true
 
-if [[ -n "$PTERO_ADMIN_EMAIL" ]]; then
+if [[ -n "$ADMIN_EMAIL" ]]; then
   log "Creating admin user"
   php artisan p:user:make \
-    --email="$PTERO_ADMIN_EMAIL" \
-    --username="$PTERO_ADMIN_USERNAME" \
-    --name-first="$PTERO_ADMIN_FIRST_NAME" \
-    --name-last="$PTERO_ADMIN_LAST_NAME" \
-    --password="$PTERO_ADMIN_PASSWORD" \
+    --email="$ADMIN_EMAIL" \
+    --username="$ADMIN_USERNAME" \
+    --name-first="$ADMIN_FIRST" \
+    --name-last="$ADMIN_LAST" \
+    --password="$ADMIN_PASSWORD" \
     --admin=1
 else
-  log "Skipping admin creation because PTERO_ADMIN_EMAIL was not set"
+  log "Skipping admin creation because PTERO_ADMIN_EMAIL is not set"
 fi
 
-log "Starting queue worker in background"
+log "Starting queue worker"
 pkill -f "artisan queue:work" >/dev/null 2>&1 || true
 nohup php artisan queue:work --queue=high,standard,low --sleep=3 --tries=3 \
   > storage/logs/queue-worker.log 2>&1 &
 
-log "Starting Pterodactyl on 0.0.0.0:${PANEL_PORT}"
+log "Starting Panel on port ${PANEL_PORT}"
 pkill -f "artisan serve --host=0.0.0.0 --port=${PANEL_PORT}" >/dev/null 2>&1 || true
 nohup php artisan serve --host=0.0.0.0 --port="${PANEL_PORT}" \
   > storage/logs/panel-web.log 2>&1 &
 
-cat <<EOF
-
-==========================================
-Pterodactyl Panel installed in Codespaces
-==========================================
-
-App directory:
-  ${APP_DIR}
-
-Panel URL:
-  ${APP_URL}
-
-Database:
-  name=${PTERO_DB_NAME}
-  user=${PTERO_DB_USER}
-  pass=${PTERO_DB_PASS}
-
-Admin login:
-EOF
-
-if [[ -n "$PTERO_ADMIN_EMAIL" ]]; then
-  cat <<EOF
-  email=${PTERO_ADMIN_EMAIL}
-  username=${PTERO_ADMIN_USERNAME}
-  password=${PTERO_ADMIN_PASSWORD}
-EOF
+echo
+echo "=============================================="
+echo "Pterodactyl Panel installed in Codespaces"
+echo "=============================================="
+echo "URL: $APP_URL"
+echo "App dir: $APP_DIR"
+echo "DB name: $DB_NAME"
+echo "DB user: $DB_USER"
+echo "DB pass: $DB_PASS"
+if [[ -n "$ADMIN_EMAIL" ]]; then
+  echo "Admin email: $ADMIN_EMAIL"
+  echo "Admin username: $ADMIN_USERNAME"
+  echo "Admin password: $ADMIN_PASSWORD"
 else
-  cat <<EOF
-  Not created automatically.
-  Create one manually with:
-    cd ${APP_DIR}
-    php artisan p:user:make
-EOF
+  echo "Admin account not auto-created."
+  echo "Create one with:"
+  echo "  cd $APP_DIR && php artisan p:user:make"
 fi
-
-cat <<EOF
-
-Logs:
-  tail -f ${APP_DIR}/storage/logs/panel-web.log
-  tail -f ${APP_DIR}/storage/logs/queue-worker.log
-
-Important:
-- In Codespaces, make sure port ${PANEL_PORT} is forwarded.
-- If the forwarded URL opens but looks broken, refresh after ~10 seconds.
-- This sets up the Panel only. Wings/game server nodes are a separate step.
-
-EOF
+echo
+echo "Logs:"
+echo "  tail -f $APP_DIR/storage/logs/panel-web.log"
+echo "  tail -f $APP_DIR/storage/logs/queue-worker.log"
+echo
+echo "Make sure port ${PANEL_PORT} is forwarded in Codespaces."
