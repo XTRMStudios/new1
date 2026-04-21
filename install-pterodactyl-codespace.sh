@@ -106,7 +106,7 @@ log "Generating app key"
 "$PHP_BIN" artisan key:generate --force
 
 log "Creating database and database user"
-mysql -u root <<SQL
+$SUDO mariadb <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;
 CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
 CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
