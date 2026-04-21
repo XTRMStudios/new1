@@ -15,7 +15,7 @@ ADMIN_EMAIL="${PTERO_ADMIN_EMAIL:-}"
 ADMIN_USERNAME="${PTERO_ADMIN_USERNAME:-admin}"
 ADMIN_FIRST="${PTERO_ADMIN_FIRST_NAME:-Admin}"
 ADMIN_LAST="${PTERO_ADMIN_LAST_NAME:-User}"
-ADMIN_PASSWORD="${PTERO_ADMIN_PASSWORD:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}"
+ADMIN_PASSWORD="${PTERO_ADMIN_PASSWORD:-}"
 
 PHP_BIN="/usr/bin/php8.3"
 COMPOSER_BIN="/usr/bin/composer"
@@ -64,7 +64,30 @@ set_env_value() {
   fi
 }
 
+maybe_prompt_admin_details() {
+  if [[ "${INTERACTIVE_SETUP:-0}" == "1" ]]; then
+    if [[ -z "$ADMIN_EMAIL" ]]; then
+      read -rp "Admin email: " ADMIN_EMAIL
+    fi
+    if [[ -z "$ADMIN_USERNAME" ]]; then
+      read -rp "Admin username: " ADMIN_USERNAME
+    fi
+    if [[ -z "$ADMIN_FIRST" ]]; then
+      read -rp "Admin first name: " ADMIN_FIRST
+    fi
+    if [[ -z "$ADMIN_LAST" ]]; then
+      read -rp "Admin last name: " ADMIN_LAST
+    fi
+    if [[ -z "$ADMIN_PASSWORD" ]]; then
+      read -rsp "Admin password: " ADMIN_PASSWORD
+      echo
+    fi
+  fi
+}
+
 APP_URL="$(detect_url)"
+
+maybe_prompt_admin_details
 
 log "Installing packages"
 $SUDO apt-get update
@@ -171,7 +194,7 @@ log "Final cache build"
 "$PHP_BIN" artisan route:cache || true
 "$PHP_BIN" artisan view:cache || true
 
-if [[ -n "$ADMIN_EMAIL" ]]; then
+if [[ -n "$ADMIN_EMAIL" && -n "$ADMIN_USERNAME" && -n "$ADMIN_FIRST" && -n "$ADMIN_LAST" && -n "$ADMIN_PASSWORD" ]]; then
   log "Creating admin user"
   "$PHP_BIN" artisan p:user:make \
     --email="$ADMIN_EMAIL" \
@@ -181,7 +204,7 @@ if [[ -n "$ADMIN_EMAIL" ]]; then
     --password="$ADMIN_PASSWORD" \
     --admin=1
 else
-  log "Skipping admin creation because PTERO_ADMIN_EMAIL is not set"
+  log "Skipping admin creation because admin details were not fully set"
 fi
 
 log "Stopping old processes"
@@ -206,7 +229,7 @@ echo "DB name: $DB_NAME"
 echo "DB user: $DB_USER"
 echo "DB pass: $DB_PASS"
 echo "PHP binary: $PHP_BIN"
-if [[ -n "$ADMIN_EMAIL" ]]; then
+if [[ -n "$ADMIN_EMAIL" && -n "$ADMIN_PASSWORD" ]]; then
   echo "Admin email: $ADMIN_EMAIL"
   echo "Admin username: $ADMIN_USERNAME"
   echo "Admin password: $ADMIN_PASSWORD"
