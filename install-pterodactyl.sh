@@ -7,6 +7,8 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 ROLE="${ROLE:-panel}"                 # panel | node
 INTERACTIVE_SETUP="${INTERACTIVE_SETUP:-0}"
 
+# Shared
+PANEL_URL="${PANEL_URL:-}"
 PHP_BIN="/usr/bin/php8.3"
 COMPOSER_BIN="/usr/bin/composer"
 
@@ -250,7 +252,6 @@ SQL
   if [[ -n "$ADMIN_EMAIL" ]]; then
     echo "Admin email: $ADMIN_EMAIL"
     echo "Admin username: $ADMIN_USERNAME"
-    echo "Admin password: $ADMIN_PASSWORD"
   fi
   echo
   echo "Cloudflare Tunnel service for the panel:"
@@ -258,19 +259,19 @@ SQL
 }
 
 node_setup_prompts() {
-  NODE_PANEL_URL="${NODE_PANEL_URL:-}"
+  NODE_FQDN="${NODE_FQDN:-}"
+  NODE_PANEL_URL="${NODE_PANEL_URL:-$PANEL_URL}"
   WINGS_TOKEN="${WINGS_TOKEN:-}"
   NODE_ID="${NODE_ID:-}"
-  NODE_FQDN="${NODE_FQDN:-}"
 
   if [[ "$INTERACTIVE_SETUP" == "1" ]]; then
     ask NODE_PANEL_URL "Panel URL" "${NODE_PANEL_URL}"
     ask NODE_ID "Node ID from panel" "${NODE_ID}"
     ask WINGS_TOKEN "Wings config token from panel" "${WINGS_TOKEN}"
-    ask NODE_FQDN "Node FQDN or public IP (optional)" "${NODE_FQDN}"
+    ask NODE_FQDN "Node FQDN or public IP (for your own reference)" "${NODE_FQDN}"
   fi
 
-  [[ -n "$NODE_PANEL_URL" ]] || { echo "NODE_PANEL_URL is required for ROLE=node"; exit 1; }
+  [[ -n "$NODE_PANEL_URL" ]] || { echo "NODE_PANEL_URL/PANEL_URL is required for ROLE=node"; exit 1; }
   [[ -n "$NODE_ID" ]] || { echo "NODE_ID is required for ROLE=node"; exit 1; }
   [[ -n "$WINGS_TOKEN" ]] || { echo "WINGS_TOKEN is required for ROLE=node"; exit 1; }
 }
@@ -278,32 +279,40 @@ node_setup_prompts() {
 install_node() {
   node_setup_prompts
 
-  log "Installing Docker and node prerequisites"
+  log "Installing Docker and Wings prerequisites"
   $SUDO apt-get update
   $SUDO apt-get install -y \
-    curl ca-certificates gnupg lsb-release apt-transport-https software-properties-common
+    curl ca-certificates gnupg lsb-release software-properties-common apt-transport-https
 
-  log "Installing Docker"
-  curl -fsSL https://get.docker.com | $SUDO bash
+  $SUDO install -m 0755 -d /etc/apt/keyrings
+  if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | $SUDO gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    $SUDO chmod a+r /etc/apt/keyrings/docker.gpg
+  fi
 
-  log "Enabling Docker"
+  local arch codename
+  arch="$(dpkg --print-architecture)"
+  codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+  echo \
+    "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${codename} stable" \
+    | $SUDO tee /etc/apt/sources.list.d/docker.list >/dev/null
+
+  $SUDO apt-get update
+  $SUDO apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+  log "Starting Docker"
   $SUDO systemctl enable --now docker
 
   log "Installing Wings"
-  curl -L https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64 -o /tmp/wings
+  curl -fsSL https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64 -o /tmp/wings
   chmod +x /tmp/wings
   $SUDO mv /tmp/wings /usr/local/bin/wings
-
-  log "Creating /etc/pterodactyl"
   $SUDO mkdir -p /etc/pterodactyl
 
-  log "Configuring Wings"
-  $SUDO wings configure \
-    --panel-url "$NODE_PANEL_URL" \
-    --token "$WINGS_TOKEN" \
-    --node "$NODE_ID"
+  log "Configuring Wings from panel token"
+  $SUDO wings configure --panel-url "$NODE_PANEL_URL" --token "$WINGS_TOKEN" --node "$NODE_ID"
 
-  log "Creating systemd service for Wings"
+  log "Creating systemd service"
   $SUDO tee /etc/systemd/system/wings.service >/dev/null <<'EOF'
 [Unit]
 Description=Pterodactyl Wings Daemon
@@ -313,9 +322,12 @@ Requires=docker.service
 [Service]
 User=root
 WorkingDirectory=/etc/pterodactyl
+LimitNOFILE=4096
+PIDFile=/var/run/wings/daemon.pid
 ExecStart=/usr/local/bin/wings
-Restart=always
-RestartSec=5s
+Restart=on-failure
+StartLimitInterval=180
+StartLimitBurst=30
 
 [Install]
 WantedBy=multi-user.target
@@ -323,8 +335,7 @@ EOF
 
   log "Starting Wings"
   $SUDO systemctl daemon-reload
-  $SUDO systemctl enable wings
-  $SUDO systemctl restart wings
+  $SUDO systemctl enable --now wings
 
   echo
   echo "=============================================="
@@ -339,8 +350,9 @@ EOF
   echo "Check status with:"
   echo "  sudo systemctl status wings"
   echo
-  echo "Do not put Wings behind Cloudflare Tunnel."
-  echo "Use a direct IP or DNS record with proxy OFF."
+  echo "Important:"
+  echo "  Do not put Wings behind a Cloudflare Tunnel."
+  echo "  Use a direct public IP or a DNS record with proxy OFF."
 }
 
 case "$ROLE" in
