@@ -119,7 +119,6 @@ log "Writing environment config"
 cat > .env <<EOF
 APP_NAME=Pterodactyl
 APP_ENV=production
-APP_KEY=
 APP_DEBUG=true
 APP_URL=${APP_URL}
 
@@ -138,7 +137,7 @@ DB_DATABASE=${DB_NAME}
 DB_USERNAME=${DB_USER}
 DB_PASSWORD=${DB_PASS}
 
-BROADCAST_DRIVER=log
+BROADCAST_CONNECTION=log
 CACHE_STORE=file
 FILESYSTEM_DISK=local
 QUEUE_CONNECTION=redis
@@ -147,7 +146,7 @@ SESSION_LIFETIME=120
 
 MEMCACHED_HOST=127.0.0.1
 
-REDIS_CLIENT=phpredis
+REDIS_CLIENT=predis
 REDIS_HOST=127.0.0.1
 REDIS_PASSWORD=null
 REDIS_PORT=6379
@@ -158,13 +157,11 @@ MAIL_HOST=127.0.0.1
 MAIL_PORT=1025
 MAIL_USERNAME=null
 MAIL_PASSWORD=null
-MAIL_FROM_ADDRESS="panel@example.com"
-MAIL_FROM_NAME="Pterodactyl"
-
-APP_ENVIRONMENT_ONLY=false
+MAIL_FROM_ADDRESS=panel@example.com
+MAIL_FROM_NAME=Pterodactyl
 EOF
 
-log "Regenerating app key into new .env"
+log "Generating app key into .env"
 "$PHP_BIN" artisan key:generate --force
 
 log "Fixing permissions"
