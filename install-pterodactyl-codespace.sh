@@ -9,7 +9,7 @@ PANEL_PORT="${PANEL_PORT:-8080}"
 
 DB_NAME="${PTERO_DB_NAME:-panel}"
 DB_USER="${PTERO_DB_USER:-pterodactyl}"
-DB_PASS="${PTERO_DB_PASS:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}"
+DB_PASS="${PTERO_DB_PASS:-$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)}"
 
 ADMIN_EMAIL="${PTERO_ADMIN_EMAIL:-}"
 ADMIN_USERNAME="${PTERO_ADMIN_USERNAME:-admin}"
@@ -32,18 +32,17 @@ log() {
 }
 
 start_service() {
-  local name="$1"
-  $SUDO service "$name" start >/dev/null 2>&1 || true
+  $SUDO service "$1" start >/dev/null 2>&1 || true
 }
 
 wait_for_mysql() {
   for _ in {1..30}; do
-    if mysqladmin ping --silent >/dev/null 2>&1; then
+    if $SUDO mysqladmin ping --silent >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
   done
-  echo "MariaDB did not start in time."
+  echo "MariaDB failed to start."
   exit 1
 }
 
@@ -55,37 +54,41 @@ detect_url() {
   fi
 }
 
+set_env_value() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" .env; then
+    sed -i "s|^${key}=.*|${key}=${value}|" .env
+  else
+    echo "${key}=${value}" >> .env
+  fi
+}
+
 APP_URL="$(detect_url)"
 
-log "Installing system packages"
+log "Installing packages"
 $SUDO apt-get update
 $SUDO apt-get install -y \
   curl ca-certificates unzip tar git jq openssl \
-  mariadb-server redis-server nginx \
-  php8.3 php8.3-cli php8.3-fpm php8.3-mysql php8.3-gd php8.3-mbstring php8.3-bcmath php8.3-xml php8.3-curl php8.3-zip php8.3-intl php8.3-sqlite3 php8.3-common php8.3-readline libapache2-mod-php8.3 \
-  php-cli php-fpm php-mysql php-gd php-mbstring php-bcmath php-xml php-curl php-zip php-intl \
-  composer redis-tools mariadb-client
+  mariadb-server mariadb-client redis-server redis-tools nginx \
+  php8.3 php8.3-cli php8.3-common php8.3-mysql php8.3-gd php8.3-mbstring php8.3-bcmath php8.3-xml php8.3-curl php8.3-zip php8.3-intl php8.3-sqlite3 php8.3-readline \
+  composer
 
-log "Checking PHP binary"
-if [[ ! -x "$PHP_BIN" ]]; then
-  echo "Expected PHP binary not found at $PHP_BIN"
-  exit 1
-fi
-
-log "Checking required PHP extensions"
-"$PHP_BIN" -m | grep -qi '^pdo_mysql$' || { echo "pdo_mysql missing"; exit 1; }
-"$PHP_BIN" -m | grep -qi '^zip$' || { echo "zip missing"; exit 1; }
-"$PHP_BIN" -m | grep -qi '^bcmath$' || { echo "bcmath missing"; exit 1; }
-"$PHP_BIN" -m | grep -qi '^sodium$' || { echo "sodium missing"; exit 1; }
+log "Checking PHP"
+[[ -x "$PHP_BIN" ]] || { echo "Missing $PHP_BIN"; exit 1; }
+"$PHP_BIN" -m | grep -qi '^pdo_mysql$' || { echo "Missing pdo_mysql"; exit 1; }
+"$PHP_BIN" -m | grep -qi '^zip$' || { echo "Missing zip"; exit 1; }
+"$PHP_BIN" -m | grep -qi '^bcmath$' || { echo "Missing bcmath"; exit 1; }
+"$PHP_BIN" -m | grep -qi '^sodium$' || { echo "Missing sodium"; exit 1; }
 
 log "Starting MariaDB and Redis"
 start_service mariadb
 start_service mysql
 start_service redis-server
-
 wait_for_mysql
 
 log "Preparing app directory"
+rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR"
 cd "$APP_DIR"
 
@@ -94,88 +97,76 @@ curl -fsSL https://github.com/pterodactyl/panel/releases/latest/download/panel.t
 tar -xzf panel.tar.gz
 rm -f panel.tar.gz
 
-log "Preparing environment file"
-if [[ ! -f ".env" ]]; then
-  cp .env.example .env
-fi
+log "Preparing .env"
+cp .env.example .env
 
-log "Installing PHP dependencies with forced PHP 8.3"
+log "Installing composer dependencies"
 COMPOSER_ALLOW_SUPERUSER=1 "$PHP_BIN" "$COMPOSER_BIN" install --no-dev --optimize-autoloader
 
-log "Generating app key"
-"$PHP_BIN" artisan key:generate --force
-
-log "Creating database and database user"
+log "Creating database and user"
 $SUDO mariadb <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;
-CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
-CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
+DROP USER IF EXISTS '${DB_USER}'@'localhost';
+DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1';
+CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+CREATE USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';
+GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
 FLUSH PRIVILEGES;
 SQL
 
-log "Writing environment config"
-cat > .env <<EOF
-APP_NAME=Pterodactyl
-APP_ENV=production
-APP_DEBUG=true
-APP_URL=${APP_URL}
+log "Writing environment settings"
+set_env_value APP_ENV production
+set_env_value APP_DEBUG true
+set_env_value APP_URL "$APP_URL"
+set_env_value APP_TIMEZONE UTC
 
-APP_TIMEZONE=UTC
-APP_SERVICE_AUTHOR=unknown@example.com
+set_env_value DB_CONNECTION mysql
+set_env_value DB_HOST 127.0.0.1
+set_env_value DB_PORT 3306
+set_env_value DB_DATABASE "$DB_NAME"
+set_env_value DB_USERNAME "$DB_USER"
+set_env_value DB_PASSWORD "$DB_PASS"
 
-TRUSTED_PROXIES=*
-LOG_CHANNEL=stack
-LOG_DEPRECATIONS_CHANNEL=null
-LOG_LEVEL=debug
+set_env_value BROADCAST_CONNECTION log
+set_env_value CACHE_STORE file
+set_env_value FILESYSTEM_DISK local
+set_env_value QUEUE_CONNECTION redis
+set_env_value SESSION_DRIVER file
+set_env_value SESSION_LIFETIME 120
 
-DB_CONNECTION=mysql
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_DATABASE=${DB_NAME}
-DB_USERNAME=${DB_USER}
-DB_PASSWORD=${DB_PASS}
+set_env_value REDIS_HOST 127.0.0.1
+set_env_value REDIS_PASSWORD null
+set_env_value REDIS_PORT 6379
 
-BROADCAST_CONNECTION=log
-CACHE_STORE=file
-FILESYSTEM_DISK=local
-QUEUE_CONNECTION=redis
-SESSION_DRIVER=file
-SESSION_LIFETIME=120
+set_env_value MAIL_MAILER log
+set_env_value MAIL_HOST 127.0.0.1
+set_env_value MAIL_PORT 1025
+set_env_value MAIL_USERNAME null
+set_env_value MAIL_PASSWORD null
+set_env_value MAIL_FROM_ADDRESS panel@example.com
+set_env_value MAIL_FROM_NAME Pterodactyl
 
-MEMCACHED_HOST=127.0.0.1
-
-REDIS_CLIENT=predis
-REDIS_HOST=127.0.0.1
-REDIS_PASSWORD=null
-REDIS_PORT=6379
-
-MAIL_MAILER=log
-MAIL_SCHEME=null
-MAIL_HOST=127.0.0.1
-MAIL_PORT=1025
-MAIL_USERNAME=null
-MAIL_PASSWORD=null
-MAIL_FROM_ADDRESS=panel@example.com
-MAIL_FROM_NAME=Pterodactyl
-EOF
-
-log "Generating app key into .env"
+log "Generating application key"
 "$PHP_BIN" artisan key:generate --force
+
+log "Testing database connection"
+mysql -h 127.0.0.1 -u "$DB_USER" -p"$DB_PASS" -e "USE \`${DB_NAME}\`; SELECT 1;" >/dev/null
 
 log "Fixing permissions"
 mkdir -p storage/logs bootstrap/cache
 chmod -R 755 storage bootstrap/cache || true
 
-log "Running migrations and seeds"
-"$PHP_BIN" artisan migrate --seed --force
-
-log "Storage and caches"
-"$PHP_BIN" artisan storage:link || true
+log "Clearing cached config"
 "$PHP_BIN" artisan config:clear || true
 "$PHP_BIN" artisan cache:clear || true
 "$PHP_BIN" artisan view:clear || true
+
+log "Running migrations"
+"$PHP_BIN" artisan migrate --seed --force
+
+log "Final cache build"
+"$PHP_BIN" artisan storage:link || true
 "$PHP_BIN" artisan config:cache || true
 "$PHP_BIN" artisan route:cache || true
 "$PHP_BIN" artisan view:cache || true
@@ -193,7 +184,7 @@ else
   log "Skipping admin creation because PTERO_ADMIN_EMAIL is not set"
 fi
 
-log "Stopping old workers if present"
+log "Stopping old processes"
 pkill -f "artisan queue:work" >/dev/null 2>&1 || true
 pkill -f "artisan serve --host=0.0.0.0 --port=${PANEL_PORT}" >/dev/null 2>&1 || true
 
