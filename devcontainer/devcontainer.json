@@ -1,0 +1,20 @@
+{
+  "name": "PufferPanel Codespace",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "forwardPorts": [8080, 5657],
+  "portsAttributes": {
+    "8080": {
+      "label": "PufferPanel Web UI",
+      "onAutoForward": "openPreview"
+    },
+    "5657": {
+      "label": "PufferPanel SFTP",
+      "onAutoForward": "silent"
+    }
+  },
+  "postCreateCommand": "chmod +x install-pufferpanel.sh && ./install-pufferpanel.sh",
+  "remoteUser": "vscode"
+}
