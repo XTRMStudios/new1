@@ -3,13 +3,11 @@ set -euo pipefail
 
 echo "==> Starting PufferPanel Codespaces installer"
 
-# Check Docker
 if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker is not available. Make sure Codespace is using devcontainer."
+  echo "Docker is not available. Make sure the Codespace is using the devcontainer."
   exit 1
 fi
 
-# Detect compose
 if docker compose version >/dev/null 2>&1; then
   COMPOSE_CMD="docker compose"
 elif command -v docker-compose >/dev/null 2>&1; then
@@ -27,7 +25,6 @@ $COMPOSE_CMD up -d
 echo "==> Waiting for PufferPanel to boot..."
 sleep 10
 
-# Prompt user input
 echo
 echo "=== Create Admin User ==="
 read -p "Username: " PP_USER
@@ -37,15 +34,14 @@ echo
 read -s -p "Confirm Password: " PP_PASS_CONFIRM
 echo
 
-# Check password match
 if [ "$PP_PASS" != "$PP_PASS_CONFIRM" ]; then
-  echo "❌ Passwords do not match. Restart script."
+  echo "Passwords do not match."
   exit 1
 fi
 
 echo "==> Creating admin user..."
 
-docker exec -i pufferpanel /pufferpanel/pufferpanel user add <<EOF
+docker exec -i pufferpanel /pufferpanel/bin/pufferpanel user add <<EOF
 $PP_USER
 $PP_EMAIL
 $PP_PASS
@@ -54,13 +50,9 @@ y
 EOF
 
 echo
-echo "✅ Admin user created successfully!"
-
+echo "Admin user created successfully."
+echo "Open the forwarded port 8080 in Codespaces."
 echo
-echo "🌐 Open PufferPanel:"
-echo "➡️ Go to the Ports tab and open port 8080"
-echo
-
-echo "📋 Useful commands:"
-echo "Logs: docker logs -f pufferpanel"
-echo "Restart: $COMPOSE_CMD restart"
+echo "Useful commands:"
+echo "  docker logs -f pufferpanel"
+echo "  $COMPOSE_CMD restart"
